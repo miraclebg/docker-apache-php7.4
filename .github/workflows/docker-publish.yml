@@ -40,13 +40,13 @@ jobs:
             echo "build_version=dev-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build & push (amd64, arm64, arm/v7)
+      - name: Build & push (amd64)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          platforms: linux/amd64
           build-args: |
             VERSION=${{ steps.vars.outputs.build_version }}
           tags: |
