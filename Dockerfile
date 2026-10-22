@@ -98,13 +98,28 @@ LABEL maintainer="Martin Kovachev <miracle@nimasystems.com>"
 
 WORKDIR /var/www/html
 
+# Tarballs are downloaded directly (with retries) and checked against pinned
+# SHA-256 sums, then installed from the local files. `pecl install <name>-<ver>`
+# goes through pecl.php.net's REST metadata, which intermittently fails for CI
+# runners ("does not have REST xml available") and verifies nothing.
+# Update a checksum together with its version above.
 # sodium is not installed from PECL: the core already builds the bundled
 # ext/sodium as a shared module and enables it.
-RUN pecl install \
-    imagick-${PECL_IMAGICK_VERSION} \
-    redis-${PECL_REDIS_VERSION} \
-    yaml-${PECL_YAML_VERSION} \
-    apcu-${PECL_APCU_VERSION}
+RUN set -eux; \
+    mkdir -p /build/pecl; \
+    cd /build/pecl; \
+    for pkg in \
+        "imagick-${PECL_IMAGICK_VERSION} 3a3587c0a524c17d0dad9673a160b90cd776e836838474e173b549ed864352ee" \
+        "redis-${PECL_REDIS_VERSION} 0d5141f634bd1db6c1ddcda053d25ecf2c4fc1c395430d534fd3f8d51dd7f0b5" \
+        "yaml-${PECL_YAML_VERSION} bc8404807a3a4dc896b310af21a7f8063aa238424ff77f27eb6ffa88b5874b8a" \
+        "apcu-${PECL_APCU_VERSION} ca9c1820810a168786f8048a4c3f8c9e3fd941407ad1553259fb2e30b5f057bf" \
+    ; do \
+        set -- $pkg; \
+        curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o "$1.tgz" "https://pecl.php.net/get/$1.tgz"; \
+        echo "$2 *$1.tgz" | sha256sum -c -; \
+        pecl install --nodeps "/build/pecl/$1.tgz"; \
+    done; \
+    rm -rf /build/pecl /tmp/pear
 
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
   && docker-php-ext-configure imap --with-kerberos --with-imap-ssl \
