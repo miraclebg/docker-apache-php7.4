@@ -36,6 +36,7 @@ core/fpm, core/apache   official docker-library/php 7.4/bullseye recipes
                         (commit b9f17156020c, the last one before 7.4 was retired),
                         unchanged except for lines marked "NIMASYSTEMS"
 patches/                patches applied, in order, to the PHP source before ./configure
+pecl/                   vendored PECL release tarballs + SHA256SUMS
 Dockerfile              extensions, locales, composer and the "app" user, on top of the core
 docker-bake.hcl         wires core/<variant> into the Dockerfile as the "php-core" context
 ```
@@ -50,8 +51,13 @@ What the core build adds to the upstream recipe:
 4. The patched tree is re-packed as `/usr/src/php.tar.xz`, so extensions built
    later with `docker-php-ext-install` are compiled from patched source too.
 
-PECL extensions are pinned in `Dockerfile` (`imagick`, `redis`, `yaml`, `apcu`)
-together with `excimer`.
+PECL extensions (`imagick`, `redis`, `yaml`, `apcu`) are pinned in
+`Dockerfile` and their release tarballs are vendored in `pecl/` (verified
+against `pecl/SHA256SUMS` at build time). Builds therefore never contact
+pecl.php.net, which intermittently serves CI runners broken responses. To bump
+one, replace its tarball from `https://pecl.php.net/get/<name>-<version>.tgz`,
+regenerate `SHA256SUMS` (`shasum -a 256 *.tgz | sed 's/  / */' > SHA256SUMS`)
+and update the version `ARG`. `excimer` is cloned from GitHub at a pinned tag.
 
 ## Adding a new backport
 

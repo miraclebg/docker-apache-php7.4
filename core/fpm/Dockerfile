@@ -249,7 +249,9 @@ RUN set -eux; \
 	rm -rf /var/lib/apt/lists/*; \
 	\
 # update pecl channel definitions https://github.com/docker-library/php/issues/443
-	pecl update-channels; \
+# NIMASYSTEMS: non-fatal - pecl.php.net intermittently serves CI runners non-XML
+# responses, and nothing in our build depends on fresh channel metadata.
+	pecl update-channels || echo "WARNING: pecl update-channels failed (ignored)"; \
 	rm -rf /tmp/pear ~/.pearrc; \
 	\
 # smoke test

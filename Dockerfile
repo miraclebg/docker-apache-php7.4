@@ -26,9 +26,11 @@ FROM php-core AS base
 
 LABEL maintainer="Martin Kovachev <miracle@nimasystems.com>"
 
+# No `pecl channel-update`: extensions are installed from checksum-verified
+# local tarballs (build-php7 stage), so PECL's channel metadata is never used -
+# and pecl.php.net intermittently serves CI runners non-XML responses.
 RUN apt-get update -y \
   && apt-get upgrade -y \
-  && pecl channel-update pecl.php.net \
   && apt-get install -y acl locales \
   && echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen \
   && echo 'es_ES.UTF-8 UTF-8' >> /etc/locale.gen \
@@ -98,26 +100,24 @@ LABEL maintainer="Martin Kovachev <miracle@nimasystems.com>"
 
 WORKDIR /var/www/html
 
-# Tarballs are downloaded directly (with retries) and checked against pinned
-# SHA-256 sums, then installed from the local files. `pecl install <name>-<ver>`
-# goes through pecl.php.net's REST metadata, which intermittently fails for CI
-# runners ("does not have REST xml available") and verifies nothing.
-# Update a checksum together with its version above.
+# The PECL release tarballs are vendored in pecl/ (with SHA256SUMS) instead of
+# fetched at build time: pecl.php.net intermittently serves CI runners
+# non-XML / challenge responses, which broke builds. To bump an extension,
+# replace its tarball from https://pecl.php.net/get/<name>-<version>.tgz,
+# regenerate pecl/SHA256SUMS and update the version ARG above.
 # sodium is not installed from PECL: the core already builds the bundled
 # ext/sodium as a shared module and enables it.
+COPY pecl/ /build/pecl/
 RUN set -eux; \
-    mkdir -p /build/pecl; \
     cd /build/pecl; \
+    sha256sum -c SHA256SUMS; \
     for pkg in \
-        "imagick-${PECL_IMAGICK_VERSION} 3a3587c0a524c17d0dad9673a160b90cd776e836838474e173b549ed864352ee" \
-        "redis-${PECL_REDIS_VERSION} 0d5141f634bd1db6c1ddcda053d25ecf2c4fc1c395430d534fd3f8d51dd7f0b5" \
-        "yaml-${PECL_YAML_VERSION} bc8404807a3a4dc896b310af21a7f8063aa238424ff77f27eb6ffa88b5874b8a" \
-        "apcu-${PECL_APCU_VERSION} ca9c1820810a168786f8048a4c3f8c9e3fd941407ad1553259fb2e30b5f057bf" \
+        "imagick-${PECL_IMAGICK_VERSION}" \
+        "redis-${PECL_REDIS_VERSION}" \
+        "yaml-${PECL_YAML_VERSION}" \
+        "apcu-${PECL_APCU_VERSION}" \
     ; do \
-        set -- $pkg; \
-        curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o "$1.tgz" "https://pecl.php.net/get/$1.tgz"; \
-        echo "$2 *$1.tgz" | sha256sum -c -; \
-        pecl install --nodeps "/build/pecl/$1.tgz"; \
+        pecl install --nodeps "/build/pecl/$pkg.tgz"; \
     done; \
     rm -rf /build/pecl /tmp/pear
 
