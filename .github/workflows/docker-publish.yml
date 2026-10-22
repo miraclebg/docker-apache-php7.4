@@ -1,22 +1,72 @@
-name: Build & Push Docker Image
+name: Build & Push Docker Images
+
+# Builds BOTH public images (see docker-bake.hcl):
+#   registry.nimahosts.com/nimasystems-public/apache2-php7.4-debian
+#   registry.nimahosts.com/nimasystems-public/php7.4-fpm-debian
+#
+# Release = push a tag named after the image version, e.g. `7.4.33-pl1`.
+# The "-plN" suffix is compiled into PHP_VERSION, so the tag format is enforced.
+# Each architecture builds natively on its own runner (no QEMU - compiling PHP
+# under emulation takes hours), pushes "<version>-<arch>" tags, and the merge
+# job stitches them into multi-arch "<version>" (+ "latest" for tag builds).
 
 on:
   push:
     tags:
       - '*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image version to build, e.g. 7.4.33-pl1 (does not move :latest)'
+        required: true
+
+env:
+  REGISTRY: registry.nimahosts.com/nimasystems-public
+  IMAGES: apache2-php7.4-debian php7.4-fpm-debian
 
 jobs:
-  docker:
+  vars:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      php_extra_version: ${{ steps.v.outputs.php_extra_version }}
+      latest: ${{ steps.v.outputs.latest }}
+    steps:
+      - id: v
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+            LATEST=true
+          else
+            VERSION="${INPUT_VERSION}"
+            LATEST=false
+          fi
+          if [[ ! "${VERSION}" =~ ^7\.4\.33(-pl[0-9]+)$ ]]; then
+            echo "::error::Version '${VERSION}' must look like 7.4.33-plN"
+            exit 1
+          fi
+          {
+            echo "version=${VERSION}"
+            echo "php_extra_version=${BASH_REMATCH[1]}"
+            echo "latest=${LATEST}"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: vars
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm,arm64,amd64
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -28,32 +78,52 @@ jobs:
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
 
-      - name: Extract version
-        id: vars
-        run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            VERSION="${GITHUB_REF_NAME}"
-            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-            echo "build_version=${VERSION}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=" >> "$GITHUB_OUTPUT"
-            echo "build_version=dev-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build & push (amd64)
-        uses: docker/build-push-action@v6
+      - name: Build & push (${{ matrix.arch }})
+        uses: docker/bake-action@v6
+        env:
+          VERSION: ${{ needs.vars.outputs.version }}
+          PHP_EXTRA_VERSION: ${{ needs.vars.outputs.php_extra_version }}
+          TAG_SUFFIX: -${{ matrix.arch }}
         with:
-          context: .
-          file: ./Dockerfile
+          source: .
           push: true
-          platforms: linux/amd64
-          build-args: |
-            VERSION=${{ steps.vars.outputs.build_version }}
-          tags: |
-            registry.nimahosts.com/nimasystems-public/apache2-php7.4-debian:latest
-            registry.nimahosts.com/nimasystems-public/apache2-php7.4-debian:${{ github.sha }}
-            ${{ steps.vars.outputs.version && format('registry.nimahosts.com/nimasystems-public/apache2-php7.4-debian:{0}', steps.vars.outputs.version) || '' }}
-          cache-from: type=registry,ref=registry.nimahosts.com/nimasystems-public/apache2-php7.4-debian:buildcache
-          cache-to: type=registry,ref=registry.nimahosts.com/nimasystems-public/apache2-php7.4-debian:buildcache,mode=max
-          provenance: false
-          sbom: false
+          set: |
+            *.platform=linux/${{ matrix.arch }}
+            *.attest=type=provenance,disabled=true
+            *.attest=type=sbom,disabled=true
+            apache.cache-from=type=registry,ref=${{ env.REGISTRY }}/apache2-php7.4-debian:buildcache-${{ matrix.arch }}
+            apache.cache-to=type=registry,ref=${{ env.REGISTRY }}/apache2-php7.4-debian:buildcache-${{ matrix.arch }},mode=max
+            fpm.cache-from=type=registry,ref=${{ env.REGISTRY }}/php7.4-fpm-debian:buildcache-${{ matrix.arch }}
+            fpm.cache-to=type=registry,ref=${{ env.REGISTRY }}/php7.4-fpm-debian:buildcache-${{ matrix.arch }},mode=max
+
+  merge:
+    needs: [vars, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to registry
+        uses: docker/login-action@v3
+        with:
+          registry: registry.nimahosts.com
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Create multi-arch manifests
+        env:
+          VERSION: ${{ needs.vars.outputs.version }}
+          LATEST: ${{ needs.vars.outputs.latest }}
+        run: |
+          set -euo pipefail
+          for image in ${IMAGES}; do
+            ref="${REGISTRY}/${image}"
+            tags=(-t "${ref}:${VERSION}" -t "${ref}:${GITHUB_SHA}")
+            if [[ "${LATEST}" == "true" ]]; then
+              tags+=(-t "${ref}:latest")
+            fi
+            docker buildx imagetools create "${tags[@]}" \
+              "${ref}:${VERSION}-amd64" \
+              "${ref}:${VERSION}-arm64"
+            docker buildx imagetools inspect "${ref}:${VERSION}"
+          done
